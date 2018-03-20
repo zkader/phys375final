@@ -28,8 +28,6 @@ class MS_Star:
         self.Y = 0.4
         self.Z = 0.05
         self.mu = (2*self.X + 0.75*self.Y + 0.5*self.Z)**(-1.)
-        self.M_o = (4*pi/3.0)*(1e-16)**3*self.rho_c
-        self.L_o = self.M_o*self.E_rate(rho_c,T_c)
 
     def Pressure(self,Rho,T): # (Eqn. 5) equation of state, total pressure from  non-relativistic degenerate, ideal gas and photon gas 
         P_deg = ((3.*pi**2.)**(2./3.)/5.)*(hbar**2./m_e)*(Rho/m_p)**(5./3.)
@@ -47,7 +45,17 @@ class MS_Star:
         kappa_ff = 1.0E24*(self.Z + 0.0001)*(Rho/1E3)**0.7*T**(-3.5)
         kappa_es = 0.02*(1 + self.X)
         max_kesff = np.maximum(kappa_es,kappa_ff)
-        return (kappa_Hminus**-1 + max_kesff**-1)**(-1.)
+        if type(T) == type(np.array([])):
+            opacity_arr = np.ndarray(shape=T.shape)
+            highT = np.greater(T, 1e4)
+            lowT = np.logical_not(highT)
+            opacity_arr[highT] = max_kesff[highT]
+            opacity_arr[lowT] = np.power(np.power(kappa_Hminus,-1) + np.power(max_kesff,-1),-1)[lowT]
+        else:
+            if T > 1e4:
+                return max_kesff
+            else:
+                return np.power(np.power(kappa_Hminus,-1) + np.power(max_kesff,-1),-1)
 
     def diP_diRho(self,Rho,T):           # (Eqn. 7a) 
         return ((3.*pi**2.)**(2./3.)/3)*(hbar**2./(m_e*m_p))*(Rho/m_p)**(2./3.) + k_B*T/(self.mu*m_p)    
@@ -73,7 +81,7 @@ class MS_Star:
     
     def dtau_dR(self,Rho,T): # (Eqn. 2e) 
         return self.Opacity(Rho,T)*Rho
-
+        
     def CoupledODEs(self,R,Rho,T,M,L): #odes vectorized
         #return np.array([1.0,self.dRho_dR(Rho,T,R,L,M),self.dT_dR(Rho,T,R,L,M),self.dM_dR(Rho,T),self.dL_dR(Rho,T,R)])
         return np.array([self.dRho_dR(Rho,T,R,L,M),self.dT_dR(Rho,T,R,L,M),self.dM_dR(Rho,T),self.dL_dR(Rho,T,R)])
@@ -132,32 +140,68 @@ class MS_Star:
         yk1 = init + k1*25/216. + k3*1408/2565. + k4*2197/4101. - k5/5.
         zk1 = init + k1*16/135. + k3*6656/12825. + k4*28561/56430. - k5*9/50. + k6*2/55. 
 
-        if 0 not in np.fabs(zk1-yk1):
-            s = np.amin(tol*h*np.power(2*np.fabs(zk1-yk1),-1/4.))
+        error = np.abs(zk1-yk1)
+        scale = tol*(1 + np.maximum(np.abs(yk1),np.abs(init)))
+
+        err = np.sqrt(np.sum(np.power(np.divide(error,scale),2)))/np.sqrt(error.size + 1.0)
+        hk1 = h
+        if err <= 1:
+            return R_o + h, yk1, hk1
         else:
-            s = 1
-        return R_o + s*h, yk1, s*h
+            hk1 = 0.90*h*err**(-1/5.)
+            return R_o + hk1, yk1, hk1
+        
     
-    def RKF45solve(self,R,Rho,T,M,L,h=1e2,tol=1):
-        init = np.array([Rho,T,M,L])
-        numiter = 10000
+    def RKF45solve(self,R,Rho,T,h=1e5,tol=1e-7):
+        M_o = (4*pi/3.0)*(R)**3*Rho
+        L_o = M_o*self.E_rate(Rho,T)
+        init = np.array([Rho,T,M_o,L_o])
+        numiter = 1000
         self.Rs = np.ndarray(shape=(numiter,))
         self.Rhos = np.ndarray(shape=(numiter,))
         self.Ts = np.ndarray(shape=(numiter,))
         self.Ms = np.ndarray(shape=(numiter,))
         self.Ls = np.ndarray(shape=(numiter,))
 
-        self.Rs[0] = R    
         for i in range(numiter):
+            self.Rs[i] = R
             self.Rhos[i] = init[0]
             self.Ts[i] = init[1]
             self.Ms[i] = init[2]
             self.Ls[i] = init[3]
             R,init,h = self.RKF45iter(R,init,h,tol=tol)
-            if i > 0:
-                self.Rs[i] = R
         return
-    
+
+    def coupledODE(self,R,y):
+        return np.array([self.dRho_dR(y[0],y[1],R,y[2],y[3]),self.dT_dR(y[0],y[1],R,y[2],y[3]),self.dM_dR(y[0],y[1]),self.dL_dR(y[0],y[1],R)])
+
+    def ODEsolve(self,R,Rho,T):
+        M_o = (4*pi/3.0)*(R)**3*Rho
+        L_o = M_o*self.E_rate(Rho,T)
+        init = np.array([Rho,T,M_o,L_o])
+        dydr = ode(self.coupledODE)
+        #dydr.set_integrator('dop853',verbosity=1)
+        dydr.set_initial_value(init,R)
+        dr = 1e6
+        self.Rs = np.array([])
+        self.Rhos = np.array([])
+        self.Ts = np.array([])
+        self.Ls = np.array([])
+        self.Ms = np.array([])
+
+        self.Rhos = np.append(self.Rhos,Rho)
+        self.Ts = np.append(self.Ts,T)
+        self.Ls = np.append(self.Ls,L_o)
+        self.Ms = np.append(self.Ms,M_o)
+        self.Rs = np.append(self.Rs,R)
+        while dydr.successful() and dydr.t < 1e11:
+            temp = dydr.integrate(dydr.t+dr)
+            self.Rhos = np.append(self.Rhos,temp[0])
+            self.Ts = np.append(self.Ts,temp[1])
+            self.Ls = np.append(self.Ls,temp[2])
+            self.Ms = np.append(self.Ms,temp[3])
+            self.Rs = np.append(self.Rs,dydr.t+dr)
+        return    
     
     ## plot functions ##
     def plot(self,array1,array2,title='',xlabel='',ylabel=''):
@@ -165,8 +209,8 @@ class MS_Star:
         pplt.title(title)
         pplt.xlabel(xlabel)
         pplt.ylabel(ylabel)
-        #pplt.xscale('log')
-        #pplt.yscale('log')
+        pplt.xscale('log')
+        pplt.yscale('log')
         pplt.grid()
         pplt.tight_layout()
         pplt.show()
@@ -178,13 +222,22 @@ teststar = MS_Star(160000.0,15000000.0)
 #arr = teststar.PsiSolve(teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
 #teststar.plot(teststar.R_range,arr[0])
 
-#teststar.RKF45solve(1e-4,teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
+teststar.ODEsolve(1e-16,teststar.rho_c,teststar.T_c)
+#teststar.RKF45solve(0.1,teststar.rho_c,teststar.T_c)
+teststar.plot(teststar.Rs,teststar.Rhos,"Density")
+teststar.plot(teststar.Rs,teststar.Ts,"Temp")
+teststar.plot(teststar.Rs,teststar.Ms,"Mass")
+teststar.plot(teststar.Rs,teststar.dM_dR(teststar.Rhos,teststar.Ts),"DM/dr")
+teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
+teststar.plot(teststar.Rs,teststar.Pressure(teststar.Rhos,teststar.Ts),"Pressure")
 
-teststar.RK4solve(1.0,teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
+
+"""
+#teststar.RK4solve(1e-4,teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
 teststar.plot(teststar.Rs,teststar.Rhos,"Density")
 teststar.plot(teststar.Rs,teststar.Ts,"Temp")
 teststar.plot(teststar.Rs,teststar.Ms,"Mass")
 teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
 teststar.plot(teststar.Rs,teststar.Pressure(teststar.Rhos,teststar.Ts),"Pressure")
 teststar.plot(teststar.Rs,teststar.dtau_dR(teststar.Rhos,teststar.Ts),"Dtau/dr")
-
+"""
