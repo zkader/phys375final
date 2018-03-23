@@ -28,6 +28,17 @@ class MS_Star:
         self.Y = 0.4
         self.Z = 0.05
         self.mu = (2*self.X + 0.75*self.Y + 0.5*self.Z)**(-1.)
+        self.R_sol = 695700000.0 #m
+        self.T_sol = 5778.0 #K
+        self.M_sol = 1.989e30 #kg
+        self.L_sol = 3.828e26 #W
+        self.c45 = np.array([0,1/5.0,3/10.0,4/5.0,8/9.0,1.0,1.0])
+        self.a45 = np.array([[0,0,0,0,0,0],[1/5.,0,0,0,0,0],[3/40.,9/40.,0,0,0,0],[44/45.,-56/15.,32/9.,0,0,0],[19372/6561.,-25360/2187.,64448/6561.,-212/729.,0,0],[9017/3168.,-355/33.,46732/5247.,49/176.,-5103/18656.,0],[35/384.,0,500/1113.,125/192.,-2187/6784.,11/84.]])
+        self.b45 = np.array([35/384.,0.0,500/1113.,125/192.,-2187/6784.,11/84.,0.0])
+        self.bn45 = np.array([5179/57600.,0.0,7571/16695.,393/640.,-92097/339200.,187/2100.,1/40.])
+        self.reject = False
+        self.errold = 1
+        self.addtoarray = True
 
     def Pressure(self,Rho,T): # (Eqn. 5) equation of state, total pressure from  non-relativistic degenerate, ideal gas and photon gas 
         P_deg = ((3.*pi**2.)**(2./3.)/5.)*(hbar**2./m_e)*(Rho/m_p)**(5./3.)
@@ -40,11 +51,12 @@ class MS_Star:
         eps_cno = 8.24E-26*(Rho/1E5)*0.03*self.X**2.*(T/1E6)**19.9
         return eps_pp + eps_cno
 
-    def Opacity(self,Rho,T):   # (Eqn. 14) radiative opacity 
-        kappa_Hminus = 2.5E-32*(self.Z/0.02)*(Rho/1E3)**0.5*T**9.
-        kappa_ff = 1.0E24*(self.Z + 0.0001)*(Rho/1E3)**0.7*T**(-3.5)
-        kappa_es = 0.02*(1 + self.X)
+    def Opacity(self,Rho,T):   # (Eqn. 14) radiative opacity
+        kappa_Hminus = 2.5e-32*(self.Z/2e-2)*np.sqrt(Rho/1e3)*np.power(T,9)
+        kappa_ff = 1.0e24*(self.Z + 1e-4)*np.power(Rho/1e3,0.7)*np.power(T,-3.5)
+        kappa_es = 0.02*(1.0 + self.X)
         max_kesff = np.maximum(kappa_es,kappa_ff)
+        
         if type(T) == type(np.array([])):
             opacity_arr = np.ndarray(shape=T.shape)
             highT = np.greater(T, 1e4)
@@ -83,8 +95,29 @@ class MS_Star:
         return self.Opacity(Rho,T)*Rho
         
     def CoupledODEs(self,R,Rho,T,M,L): #odes vectorized
-        #return np.array([1.0,self.dRho_dR(Rho,T,R,L,M),self.dT_dR(Rho,T,R,L,M),self.dM_dR(Rho,T),self.dL_dR(Rho,T,R)])
         return np.array([self.dRho_dR(Rho,T,R,L,M),self.dT_dR(Rho,T,R,L,M),self.dM_dR(Rho,T),self.dL_dR(Rho,T,R)])
+
+    def TestCoupled(self,t,x,xprime,y,yprime,k=1.0,k2=2.0):
+        return np.array([xprime,-k*x -k2*(x-y),yprime,-k2*(y-x)])
+
+    def RKF45solvetest(self,x,x1,y,y1,k,t0,h=1e-2,atol=1e-6,rtol=1e-6):
+        init = np.array([x,x1,y,y1])
+        numiter = 10000
+        self.t = np.ndarray(shape=(numiter,))
+        self.x = np.ndarray(shape=(numiter,))
+        self.x1 = np.ndarray(shape=(numiter,))
+        self.y = np.ndarray(shape=(numiter,))
+        self.y1 = np.ndarray(shape=(numiter,))
+
+        for i in range(numiter):
+            self.t[i] = t0
+            self.x[i] = init[0]
+            self.x1[i] = init[1]
+            self.x[i] = init[2]
+            self.x1[i] = init[3]
+            t0,init,h = self.RKF45iter(self.TestCoupled,t0,init,h,atol=atol,rtol=rtol)
+        return
+        
 
     ## differential solvers ##
     def Set_R_Range(self,R_i,R_f,numpoints):
@@ -100,17 +133,52 @@ class MS_Star:
         psi0 = Rho_o,T_o,M_o,L_o        
         return odeint(self.Psi,psi0,self.R_range).T
     """
-    
-    def RK4iter(self,R,init,h):
-        k1 = self.CoupledODEs(R,*tuple(init))
-        k2 = self.CoupledODEs(R,*tuple(init + k1*h/2.0))
-        k3 = self.CoupledODEs(R,*tuple(init + k2*h/2.0))
-        k4 = self.CoupledODEs(R,*tuple(init + k3*h))
-        return R + h, init + (h/6.0)*(k1 + k2*2 + k3*2 + k4)
 
+    def RKF45iter(self,function,R_o,init,h,atol,rtol,maxscale=10.0,minscale=0.0001,beta=0.0):
+        alpha = 0.2 - beta*0.75
+        k1 = h*function(R_o,*tuple(init))
+        k2 = h*function(R_o + h*self.c45[1],*tuple(init + k1*self.a45[1,0]))
+        k3 = h*function(R_o + h*self.c45[2],*tuple(init + k1*self.a45[2,0] + k2*self.a45[2,1]))
+        k4 = h*function(R_o + h*self.c45[3],*tuple(init + k1*self.a45[3,0] + k2*self.a45[3,1] + k3*self.a45[3,2]))
+        k5 = h*function(R_o + h*self.c45[4],*tuple(init + k1*self.a45[4,0] + k2*self.a45[4,1] + k3*self.a45[4,2] + k4*self.a45[4,3]))
+        k6 = h*function(R_o + h*self.c45[5],*tuple(init + k1*self.a45[5,0] + k2*self.a45[5,1] + k3*self.a45[5,2] + k4*self.a45[5,3] + k5*self.a45[5,4]))
 
-    def RK4solve(self,R,Rho,T,M,L,h=0.5):
-        init = np.array([Rho,T,M,L])
+        yk1 = init + self.b45[0]*k1 + self.b45[1]*k2 + self.b45[2]*k3 + self.b45[3]*k4 + self.b45[4]*k5 + self.b45[5]*k6
+        ynk1 = init +  self.bn45[0]*k1 + self.bn45[1]*k2 + self.bn45[2]*k3 + self.bn45[3]*k4 + self.bn45[4]*k5 + self.bn45[5]*k6
+
+        error = np.abs(yk1-ynk1)
+        scale = atol + np.maximum(yk1,init)*rtol
+        
+        err = np.sqrt(np.sum(np.power(np.divide(error,scale),2))/error.size)
+
+        if err <= 1:
+            if err == 0:
+                hscale = maxscale
+            else:
+                hscale = 0.9*err**(-alpha)*self.errold**(beta)
+                if hscale < minscale:
+                    hscale = minscale
+                if hscale > maxscale:
+                    hscale = maxscale
+            if self.reject:
+                hk1 = h*min(hscale,1.0)
+            else:
+                hk1 = h*hscale
+            self.reject = False
+            self.errold = max(err,1.0e-4)
+            self.addtoarray = True
+        else:
+            hscale = max(0.9*err**(-alpha),minscale)
+            hk1 = h*hscale
+            self.reject = True
+            self.addtoarray = False    
+        
+        return R_o + hk1, yk1, hk1
+            
+    def RKF45solve(self,R,Rho,T,h=1e1,atol=0,rtol=1e-6,maxscale=10.0,minscale=0.0001,beta=0.0):
+        M_o = (4*pi/3.0)*(R)**3*Rho
+        L_o = M_o*self.E_rate(Rho,T)
+        init = np.array([Rho,T,M_o,L_o])
         numiter = 10000
         self.Rs = np.ndarray(shape=(numiter,))
         self.Rhos = np.ndarray(shape=(numiter,))
@@ -118,58 +186,21 @@ class MS_Star:
         self.Ms = np.ndarray(shape=(numiter,))
         self.Ls = np.ndarray(shape=(numiter,))
 
-        self.Rs[0] = R
         for i in range(numiter):
-            self.Rhos[i] = init[0]
-            self.Ts[i] = init[1]
-            self.Ms[i] = init[2]
-            self.Ls[i] = init[3]
-            R,init = self.RK4iter(R,init,h)
-            if i > 0:
-                self.Rs[i] =  R
-        return 
-
-    def RKF45iter(self,R_o,init,h,tol):
-        k1 = self.CoupledODEs(R_o,*tuple(init))
-        k2 = self.CoupledODEs(R_o+h/4.0,*tuple(init + k1*h/4.0))
-        k3 = self.CoupledODEs(R_o+h*3/8.0,*tuple(init + k1*h*3/32.0 + k2*h*9/32.0))
-        k4 = self.CoupledODEs(R_o+h*12/13.0,*tuple(init + k1*h*1932/2197.0 - k2*h*7200/2197.0 + k3*h*7296/2197.0))
-        k5 = self.CoupledODEs(R_o+h,*tuple(init + k1*h*439/216.0 - k2*h*8 + k3*h*3680/513.0 - k4*h*845/4104.0))
-        k6 = self.CoupledODEs(R_o+h/2.0,*tuple(init - k1*h*8/27.0 + k2*h*2 - k3*h*3544/2565.0 + k4*h*1859/4104.0 - k5*h*11/40.0))
-
-        yk1 = init + k1*25/216. + k3*1408/2565. + k4*2197/4101. - k5/5.
-        zk1 = init + k1*16/135. + k3*6656/12825. + k4*28561/56430. - k5*9/50. + k6*2/55. 
-
-        error = np.abs(zk1-yk1)
-        scale = tol*(1 + np.maximum(np.abs(yk1),np.abs(init)))
-
-        err = np.sqrt(np.sum(np.power(np.divide(error,scale),2)))/np.sqrt(error.size + 1.0)
-        hk1 = h
-        if err <= 1:
-            return R_o + h, yk1, hk1
-        else:
-            hk1 = 0.90*h*err**(-1/5.)
-            return R_o + hk1, yk1, hk1
-        
-    
-    def RKF45solve(self,R,Rho,T,h=1e5,tol=1e-7):
-        M_o = (4*pi/3.0)*(R)**3*Rho
-        L_o = M_o*self.E_rate(Rho,T)
-        init = np.array([Rho,T,M_o,L_o])
-        numiter = 1000
-        self.Rs = np.ndarray(shape=(numiter,))
-        self.Rhos = np.ndarray(shape=(numiter,))
-        self.Ts = np.ndarray(shape=(numiter,))
-        self.Ms = np.ndarray(shape=(numiter,))
-        self.Ls = np.ndarray(shape=(numiter,))
-
-        for i in range(numiter):
-            self.Rs[i] = R
-            self.Rhos[i] = init[0]
-            self.Ts[i] = init[1]
-            self.Ms[i] = init[2]
-            self.Ls[i] = init[3]
-            R,init,h = self.RKF45iter(R,init,h,tol=tol)
+            if init[2] > 1e3*self.M_sol:
+                break
+            dtau = self.Opacity(init[0],init[1])*init[0]*init[0]/(np.abs(self.dRho_dR(init[0],init[1],R,init[3],init[2])))
+            if np.abs(dtau - 2/3.0) < rtol:
+                print R
+                print init[3]
+            if self.addtoarray:
+                self.Rs[i] = R
+                self.Rhos[i] = init[0]
+                self.Ts[i] = init[1]
+                self.Ms[i] = init[2]
+                self.Ls[i] = init[3]
+                
+            R,init,h = self.RKF45iter(self.CoupledODEs,R,init,h,atol=atol,rtol=rtol,maxscale=maxscale,minscale=minscale,beta=beta)
         return
 
     def coupledODE(self,R,y):
@@ -209,35 +240,34 @@ class MS_Star:
         pplt.title(title)
         pplt.xlabel(xlabel)
         pplt.ylabel(ylabel)
-        pplt.xscale('log')
-        pplt.yscale('log')
+        #pplt.xscale('log')
+        #pplt.yscale('log')
         pplt.grid()
         pplt.tight_layout()
         pplt.show()
         return
     
+rho_o = (5.0*G/(4*pi))*1.9891e30*1.9891e30/(695700000.)**4
+print rho_o
+teststar = MS_Star(rho_o,1.5e7)
+#teststar.RKF45solvetest(0.,1.,0.,2.,1.0,0.0,h=1e-16,atol=1e-3,rtol=1e-3)
+#teststar.plot(teststar.t,teststar.x,"Density")
+#teststar.plot(teststar.t,teststar.x1,"Density")
 
-teststar = MS_Star(160000.0,15000000.0)
+
 #teststar.Set_R_Range(1e-16,6e11,10000)
 #arr = teststar.PsiSolve(teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
 #teststar.plot(teststar.R_range,arr[0])
 
-teststar.ODEsolve(1e-16,teststar.rho_c,teststar.T_c)
-#teststar.RKF45solve(0.1,teststar.rho_c,teststar.T_c)
-teststar.plot(teststar.Rs,teststar.Rhos,"Density")
-teststar.plot(teststar.Rs,teststar.Ts,"Temp")
-teststar.plot(teststar.Rs,teststar.Ms,"Mass")
-teststar.plot(teststar.Rs,teststar.dM_dR(teststar.Rhos,teststar.Ts),"DM/dr")
-teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
-teststar.plot(teststar.Rs,teststar.Pressure(teststar.Rhos,teststar.Ts),"Pressure")
+#teststar.ODEsolve(1e-16,teststar.rho_c,teststar.T_c)
 
-
-"""
-#teststar.RK4solve(1e-4,teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
+teststar.RKF45solve(1e1,teststar.rho_c,teststar.T_c,maxscale=20.,minscale=0.1,atol=1e-6,rtol=1e-6,beta=0.04,h=1e-6)
+print teststar.Rs
 teststar.plot(teststar.Rs,teststar.Rhos,"Density")
 teststar.plot(teststar.Rs,teststar.Ts,"Temp")
 teststar.plot(teststar.Rs,teststar.Ms,"Mass")
 teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
 teststar.plot(teststar.Rs,teststar.Pressure(teststar.Rhos,teststar.Ts),"Pressure")
-teststar.plot(teststar.Rs,teststar.dtau_dR(teststar.Rhos,teststar.Ts),"Dtau/dr")
-"""
+
+
+
