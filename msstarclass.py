@@ -137,13 +137,18 @@ class MS_Star:
 
     def RKF45iter(self,function,R_o,init,h,atol,rtol,maxscale=10.0,minscale=0.0001,beta=0.0):
         alpha = 0.2 - beta*0.75
-        k1 = h*function(R_o,*tuple(init))
-        k2 = h*function(R_o + h*self.c45[1],*tuple(init + k1*self.a45[1,0]))
-        k3 = h*function(R_o + h*self.c45[2],*tuple(init + k1*self.a45[2,0] + k2*self.a45[2,1]))
-        k4 = h*function(R_o + h*self.c45[3],*tuple(init + k1*self.a45[3,0] + k2*self.a45[3,1] + k3*self.a45[3,2]))
-        k5 = h*function(R_o + h*self.c45[4],*tuple(init + k1*self.a45[4,0] + k2*self.a45[4,1] + k3*self.a45[4,2] + k4*self.a45[4,3]))
-        k6 = h*function(R_o + h*self.c45[5],*tuple(init + k1*self.a45[5,0] + k2*self.a45[5,1] + k3*self.a45[5,2] + k4*self.a45[5,3] + k5*self.a45[5,4]))
-
+        try:
+            k1 = h*function(R_o,*tuple(init))
+            k2 = h*function(R_o + h*self.c45[1],*tuple(init + k1*self.a45[1,0]))
+            k3 = h*function(R_o + h*self.c45[2],*tuple(init + k1*self.a45[2,0] + k2*self.a45[2,1]))
+            k4 = h*function(R_o + h*self.c45[3],*tuple(init + k1*self.a45[3,0] + k2*self.a45[3,1] + k3*self.a45[3,2]))
+            k5 = h*function(R_o + h*self.c45[4],*tuple(init + k1*self.a45[4,0] + k2*self.a45[4,1] + k3*self.a45[4,2] + k4*self.a45[4,3]))
+            k6 = h*function(R_o + h*self.c45[5],*tuple(init + k1*self.a45[5,0] + k2*self.a45[5,1] + k3*self.a45[5,2] + k4*self.a45[5,3] + k5*self.a45[5,4]))
+        except ValueError:
+            hk1 = h*0.5
+            self.addtoarray=False
+            return R_o, 0, hk1
+        
         yk1 = init + self.b45[0]*k1 + self.b45[1]*k2 + self.b45[2]*k3 + self.b45[3]*k4 + self.b45[4]*k5 + self.b45[5]*k6
         ynk1 = init +  self.bn45[0]*k1 + self.bn45[1]*k2 + self.bn45[2]*k3 + self.bn45[3]*k4 + self.bn45[4]*k5 + self.bn45[5]*k6
 
@@ -172,10 +177,12 @@ class MS_Star:
             hscale = max(0.9*err**(-alpha),minscale)
             hk1 = h*hscale
             self.reject = True
-            self.addtoarray = False    
-        
-        return R_o + hk1, ynk1, hk1
-            
+            self.addtoarray = False
+        if not self.reject:
+            return R_o + hk1, ynk1, hk1
+        else:
+            return R_o, ynk1, hk1
+          
     def RKF45solve(self,R,Rho,T,h=1e1,atol=0,rtol=1e-6,maxscale=10.0,minscale=0.0001,beta=0.0):
         M_o = (4*pi/3.0)*(R)**3*Rho
         L_o = M_o*self.E_rate(Rho,T)
@@ -226,7 +233,7 @@ class MS_Star:
         L_o = M_o*self.E_rate(Rho,T)
         init = np.array([Rho,T,M_o,L_o])
         dydr = ode(self.coupledODE)
-        dydr.set_integrator('dopri5',rtol=1e-6, nsteps=10000, first_step=1e-6, max_step=1e-1, verbosity=True)
+        dydr.set_integrator('dopri5',rtol=1e-6, nsteps=100000, first_step=1e-8,beta=0.08,verbosity=True)
         dydr.set_initial_value(init,R)
         self.Rs = np.array([])
         self.Rhos = np.array([])
@@ -240,9 +247,7 @@ class MS_Star:
         self.Ls = np.append(self.Ls,L_o)
         self.Ms = np.append(self.Ms,M_o)
         self.Rs = np.append(self.Rs,R)
-        while dydr.successful() and dydr.t < 1e2:
-            print dydr.y
-            print dydr.t
+        while dydr.successful() and dydr.t < 1e1:
             dydr.integrate(dydr.t + dr)
             temp = dydr.y
             self.Rhos = np.append(self.Rhos,temp[0])
@@ -250,14 +255,12 @@ class MS_Star:
             self.Ls = np.append(self.Ls,temp[2])
             self.Ms = np.append(self.Ms,temp[3])
             self.Rs = np.append(self.Rs,dydr.t)
-            print dydr.y
-            print dydr.t
             
         return    
     
     ## plot functions ##
     def plot(self,array1,array2,title='',xlabel='',ylabel=''):
-        pplt.plot(array1,array2)
+        pplt.scatter(array1,array2)
         pplt.title(title)
         pplt.xlabel(xlabel)
         pplt.ylabel(ylabel)
@@ -286,9 +289,9 @@ teststar.plot(teststar.Rs,teststar.Ts,"Temp")
 teststar.plot(teststar.Rs,teststar.Ms,"Mass")
 teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
 
+
+
 """
-
-
 teststar.RKF45solve(1e-1,teststar.rho_c,teststar.T_c,maxscale=10.,minscale=0.9,atol=0.0,rtol=1e-6,beta=0.0)
 print np.where(teststar.Rhos < 0)
 teststar.plot(teststar.Rs,teststar.Rhos,"Density")
@@ -296,6 +299,6 @@ teststar.plot(teststar.Rs,teststar.Ts,"Temp")
 teststar.plot(teststar.Rs,teststar.Ms,"Mass")
 teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
 teststar.plot(teststar.Rs,teststar.Pressure(teststar.Rhos,teststar.Ts),"Pressure")
-
 """
+
 
