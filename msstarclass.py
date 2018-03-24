@@ -32,6 +32,7 @@ class MS_Star:
         self.T_sol = 5778.0 #K
         self.M_sol = 1.989e30 #kg
         self.L_sol = 3.828e26 #W
+        self.Rho_sol = self.M_sol/((4*pi/3.0)*self.R_sol**3)
         self.c45 = np.array([0,1/5.0,3/10.0,4/5.0,8/9.0,1.0,1.0])
         self.a45 = np.array([[0,0,0,0,0,0],[1/5.,0,0,0,0,0],[3/40.,9/40.,0,0,0,0],[44/45.,-56/15.,32/9.,0,0,0],[19372/6561.,-25360/2187.,64448/6561.,-212/729.,0,0],[9017/3168.,-355/33.,46732/5247.,49/176.,-5103/18656.,0],[35/384.,0,500/1113.,125/192.,-2187/6784.,11/84.]])
         self.b45 = np.array([35/384.,0.0,500/1113.,125/192.,-2187/6784.,11/84.,0.0])
@@ -149,7 +150,7 @@ class MS_Star:
         error = np.abs(yk1-ynk1)
         scale = atol + np.maximum(yk1,init)*rtol
         
-        err = np.sqrt(np.sum(np.power(np.divide(error,scale),2))/error.size)
+        err = np.sqrt(np.sum(np.power(np.divide(error,scale),2))/float(error.size))
 
         if err <= 1:
             if err == 0:
@@ -173,7 +174,7 @@ class MS_Star:
             self.reject = True
             self.addtoarray = False    
         
-        return R_o + hk1, yk1, hk1
+        return R_o + hk1, ynk1, hk1
             
     def RKF45solve(self,R,Rho,T,h=1e1,atol=0,rtol=1e-6,maxscale=10.0,minscale=0.0001,beta=0.0):
         M_o = (4*pi/3.0)*(R)**3*Rho
@@ -187,7 +188,7 @@ class MS_Star:
         self.Ls = np.ndarray(shape=(numiter,))
 
         for i in range(numiter):
-            if init[2] > 1e3*self.M_sol:
+            if init[2] > 1e3*self.M_sol or init[0] < 1e4:
                 break
             dtau = self.Opacity(init[0],init[1])*init[0]*init[0]/(np.abs(self.dRho_dR(init[0],init[1],R,init[3],init[2])))
             if np.abs(dtau - 2/3.0) < rtol:
@@ -204,34 +205,54 @@ class MS_Star:
         return
 
     def coupledODE(self,R,y):
-        return np.array([self.dRho_dR(y[0],y[1],R,y[2],y[3]),self.dT_dR(y[0],y[1],R,y[2],y[3]),self.dM_dR(y[0],y[1]),self.dL_dR(y[0],y[1],R)])
+        return np.array([self.dRho_dR(y[0],y[1],R,y[3],y[2]),self.dT_dR(y[0],y[1],R,y[3],y[2]),self.dM_dR(y[0],y[1]),self.dL_dR(y[0],y[1],R)])
+
+    def coupledODE2(self,y,R):        
+        return np.array([self.dRho_dR(y[0],y[1],R,y[3],y[2]),self.dT_dR(y[0],y[1],R,y[3],y[2]),self.dM_dR(y[0],y[1]),self.dL_dR(y[0],y[1],R)]).T
+
+    def ODEINTsolve(self,Rho,T,R=1.0e-16):
+        self.Rs = np.linspace(R,2.0e8,1000)
+        M_o = (4*pi/3.0)*(R)**3*Rho
+        L_o = M_o*self.E_rate(Rho,T)
+        init = np.array([Rho,T,M_o,L_o])
+        
+        temp = odeint(self.coupledODE2,init,self.Rs).T
+        self.Rhos = temp[0,::]
+        print self.Rhos.shape
+        return
 
     def ODEsolve(self,R,Rho,T):
         M_o = (4*pi/3.0)*(R)**3*Rho
         L_o = M_o*self.E_rate(Rho,T)
         init = np.array([Rho,T,M_o,L_o])
         dydr = ode(self.coupledODE)
-        #dydr.set_integrator('dop853',verbosity=1)
+        dydr.set_integrator('dopri5',rtol=1e-6, nsteps=10000, first_step=1e-6, max_step=1e-1, verbosity=True)
         dydr.set_initial_value(init,R)
-        dr = 1e6
         self.Rs = np.array([])
         self.Rhos = np.array([])
         self.Ts = np.array([])
         self.Ls = np.array([])
         self.Ms = np.array([])
-
+        dr = 1e-2
+    
         self.Rhos = np.append(self.Rhos,Rho)
         self.Ts = np.append(self.Ts,T)
         self.Ls = np.append(self.Ls,L_o)
         self.Ms = np.append(self.Ms,M_o)
         self.Rs = np.append(self.Rs,R)
-        while dydr.successful() and dydr.t < 1e11:
-            temp = dydr.integrate(dydr.t+dr)
+        while dydr.successful() and dydr.t < 1e2:
+            print dydr.y
+            print dydr.t
+            dydr.integrate(dydr.t + dr)
+            temp = dydr.y
             self.Rhos = np.append(self.Rhos,temp[0])
             self.Ts = np.append(self.Ts,temp[1])
             self.Ls = np.append(self.Ls,temp[2])
             self.Ms = np.append(self.Ms,temp[3])
-            self.Rs = np.append(self.Rs,dydr.t+dr)
+            self.Rs = np.append(self.Rs,dydr.t)
+            print dydr.y
+            print dydr.t
+            
         return    
     
     ## plot functions ##
@@ -248,26 +269,33 @@ class MS_Star:
         return
     
 rho_o = (5.0*G/(4*pi))*1.9891e30*1.9891e30/(695700000.)**4
-print rho_o
-teststar = MS_Star(rho_o,1.5e7)
-#teststar.RKF45solvetest(0.,1.,0.,2.,1.0,0.0,h=1e-16,atol=1e-3,rtol=1e-3)
-#teststar.plot(teststar.t,teststar.x,"Density")
-#teststar.plot(teststar.t,teststar.x1,"Density")
 
+teststar = MS_Star(1.0e5,1.5e7)
+#teststar.RKF45solvetest(0.,1.,0.,2.,1.0,0.0,h=1e-16,atol=1e-3,rtol=1e-3)
+#teststar.plot(teststar.t,teststar.x,"x")
+#teststar.plot(teststar.t,teststar.x1,"dx/dt")
 
 #teststar.Set_R_Range(1e-16,6e11,10000)
 #arr = teststar.PsiSolve(teststar.rho_c,teststar.T_c,teststar.M_o,teststar.L_o)
 #teststar.plot(teststar.R_range,arr[0])
 
-#teststar.ODEsolve(1e-16,teststar.rho_c,teststar.T_c)
+teststar.ODEsolve(1e-2,teststar.rho_c,teststar.T_c)
+#teststar.ODEINTsolve(teststar.rho_c,teststar.T_c)
+teststar.plot(teststar.Rs,teststar.Rhos,"Density")
+teststar.plot(teststar.Rs,teststar.Ts,"Temp")
+teststar.plot(teststar.Rs,teststar.Ms,"Mass")
+teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
 
-teststar.RKF45solve(1e1,teststar.rho_c,teststar.T_c,maxscale=20.,minscale=0.1,atol=1e-6,rtol=1e-6,beta=0.04,h=1e-6)
-print teststar.Rs
+"""
+
+
+teststar.RKF45solve(1e-1,teststar.rho_c,teststar.T_c,maxscale=10.,minscale=0.9,atol=0.0,rtol=1e-6,beta=0.0)
+print np.where(teststar.Rhos < 0)
 teststar.plot(teststar.Rs,teststar.Rhos,"Density")
 teststar.plot(teststar.Rs,teststar.Ts,"Temp")
 teststar.plot(teststar.Rs,teststar.Ms,"Mass")
 teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
 teststar.plot(teststar.Rs,teststar.Pressure(teststar.Rhos,teststar.Ts),"Pressure")
 
-
+"""
 
