@@ -6,7 +6,9 @@ Rewrite of Shoshannah's code as a class
 from astropy import constants
 import numpy as np
 import matplotlib.pyplot as pplt
-from scipy.integrate import odeint,ode
+from scipy.integrate import odeint,ode,trapz
+from scipy.interpolate import interp1d
+
 
 #def constants
 G = constants.G.value
@@ -83,7 +85,7 @@ class MS_Star:
     def dT_dR(self,Rho,T,R,L,M): # (Eqn. 2b) energy transfer equation
         rad_transf = 3.*self.Opacity(Rho,T)*Rho*L/(16.*pi*self.a*c*T**3.*R**2.)
         conv = (1 - 1./self.gamma)*T*G*M*Rho/(self.Pressure(Rho,T)*R**2.)
-        min_dT = min(rad_transf,conv)
+        min_dT = np.minimum(rad_transf,conv)
         return -min_dT
 
     def dM_dR(self,Rho,R): # (Eqn. 2c)
@@ -94,6 +96,9 @@ class MS_Star:
     
     def dtau_dR(self,Rho,T): # (Eqn. 2e) 
         return self.Opacity(Rho,T)*Rho
+
+    def delta_tau(self,R,Rho,T,M,L):
+        return self.Opacity(Rho,T)*np.power(Rho,1)
         
     def CoupledODEs(self,R,init): #odes vectorized
         Rho,T,M,L = init[0],init[1],init[2],init[3]
@@ -257,23 +262,40 @@ class MS_Star:
         dydr.set_initial_value(init,R)
         
         N = 10000
-        rf = 1.0e8
+        rf = 1.0e9
         R1 = np.linspace(R,rf,N)
     
         sol = np.empty((N,4))
         sol[0] = init
+        k = 0
+        taus = np.ones(N)
+        dtau = self.Opacity(sol[k,0],sol[k,1])*sol[k,0]*sol[k,0]/(np.abs(self.dRho_dR(sol[k,0],sol[k,1],dydr.t,sol[k,3],sol[k,2])))
+
         k = 1
-        
         while dydr.successful() and dydr.t < rf:
             dydr.integrate(R1[k])
             sol[k] = dydr.y
-            
+            if sol[k,2] > 1.0e3*self.M_sol:
+                break
+            dtau = self.Opacity(sol[k,0],sol[k,1])*sol[k,0]*sol[k,0]/(np.abs(self.dRho_dR(sol[k,0],sol[k,1],dydr.t,sol[k,3],sol[k,2])))
+            taus[k] = dtau 
+            if dtau < 1e-8:
+                print "bingo"
+                break
             k += 1
-        self.Rs = R1
-        self.Rhos = sol[:,0]
-        self.Ts = sol[:,1]
-        self.Ms = sol[:,2]
-        self.Ls = sol[:,3]
+
+        taus = taus[0:k]
+        end = np.where(taus == np.amin(taus))[0][0]
+        self.Rs = R1[0:end]
+        self.Rhos = sol[0:end,0]
+        self.Ts = sol[0:end,1]
+        self.Ms = sol[0:end,2]
+        self.Ls = sol[0:end,3]
+        
+        m = (taus[end] - taus[end-1])/ (R1[0:k][end] - R1[0:k][end-1])
+        b = taus[end] - m*R1[0:k][end]
+        print "Approximate Radius:", (2/3. - b)/m
+        
         return    
     
     ## plot functions ##
@@ -307,7 +329,17 @@ teststar.plot(teststar.Rs,teststar.Rhos,"Density")
 teststar.plot(teststar.Rs,teststar.Ts,"Temp")
 teststar.plot(teststar.Rs,teststar.Ms,"Mass")
 teststar.plot(teststar.Rs,teststar.Ls,"Luminosity")
-teststar.plot(teststar.Rs,teststar.dtau_dR(teststar.Rhos,teststar.Ts),"dtau/dr")
+teststar.plot(teststar.Rs,teststar.dtau_dR(teststar.Rhos,teststar.Ts),"$d_\\tau / dr$")
+dtau = teststar.dtau_dR(teststar.Rhos,teststar.Ts)
+taus = np.empty(shape=dtau.shape)
+for i in range(taus.shape[0]):
+    taus[i] = trapz(dtau[0:i],x=teststar.Rs[0:i])
+taus = taus - np.amin(taus)
+#f = interp1d(teststar.Rs[-1],taus,kind='cubic')
+
+
+teststar.plot(teststar.Rs,taus,"$\\tau$")
+teststar.plot(teststar.Rs,teststar.delta_tau(teststar.Rs,teststar.Rhos,teststar.Ts,teststar.Ms,teststar.Ls),"$\\delta \\tau$")
 
 
 
